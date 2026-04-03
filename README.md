@@ -9,7 +9,6 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat-square)
 ![Datasets](https://img.shields.io/badge/Datasets-Kvasir--SEG%20%7C%20CVC--ClinicDB-f59e0b?style=flat-square)
 
 **Authors:** Nguyen Hai Dang (23127165) · Nguyen Tran Quoc Duy (23127181)  
@@ -427,12 +426,6 @@ If you use this code in your research or coursework, please cite:
   url    = {https://github.com/DanielNguyen-05/PGD-UNet}
 }
 ```
-
----
-
-## 13. License
-
-This project is licensed under the [MIT License](LICENSE).
 
 ---
 
