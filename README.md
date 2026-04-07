@@ -145,6 +145,9 @@ source .venv/bin/activate        # Linux / macOS
 
 # Install dependencies
 pip install -r requirements.txt
+pip uninstall torch torchvision torchaudio -y
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA version:', torch.version.cuda); print('Driver version from torch:', torch.cuda.get_device_properties(0).name if torch.cuda.is_available() else 'No GPU')"
 ```
 
 > **Note:** If you need a specific CUDA build, install `torch` and `torchvision` first from the
@@ -211,7 +214,7 @@ Outputs JSON and Markdown summary reports to `analysis_data/reports/`.
 **Kvasir-SEG with standard UNet:**
 
 ```bash
-python Code/train2d.py \
+python train2d.py \
   --dataset kvasir \
   --root_path data/Kvasir-SEG \
   --model unet \
@@ -221,26 +224,31 @@ python Code/train2d.py \
   --max_epochs 100 \
   --eval_interval_epochs 1 \
   --exp teacher_unet
+  --deterministic 1 \
+  --gpu 0
 ```
 
 **CVC-ClinicDB with UNet-ResNet152 (pretrained encoder):**
 
 ```bash
-python Code/train2d.py \
+python train2d.py \
   --dataset cvc \
   --root_path data/CVC-ClinicDB \
   --model unet_resnet152 \
-  --encoder_pretrained 1 \
   --train_split train \
   --val_split val \
+  --batch_size 8 \
   --max_epochs 100 \
+  --eval_interval_epochs 1 \
   --exp teacher_resnet152
+  --deterministic 1 \
+  --gpu 0
 ```
 
 **Legacy iteration-based training (optional):**
 
 ```bash
-python Code/train2d.py \
+python train2d.py \
   --dataset kvasir \
   --root_path data/Kvasir-SEG \
   --model unet \
@@ -270,17 +278,18 @@ logs/model/supervised/<exp>/
 > ⚠️ Stages 2 and 3 (Structured Pruning and Student construction) are executed **automatically** inside this script. No manual steps required between stages.
 
 ```bash
-python Code/train_compression.py \
+python train_compression.py \
   --dataset kvasir \
   --root_path data/Kvasir-SEG \
-  --teacher_model unet_resnet152 \
-  --teacher_exp teacher_resnet152 \
+  --teacher_model unet \
+  --teacher_exp teacher_unet \
   --prune_ratio 0.5 \
   --lambda_distill 0.3 \
   --lambda_sparsity 0.3 \
-  --max_epochs 150 \
-  --batch_size 8 \
-  --exp student_run
+  --max_epochs 120 \
+  --batch_size 12 \
+  --exp student_from_unet \
+  --gpu 0
 ```
 
 | Argument | Description |
@@ -296,12 +305,12 @@ python Code/train_compression.py \
 ## 8. Evaluation & Testing
 
 ```bash
-python Code/test2d.py \
+python test2d.py \
   --dataset kvasir \
   --root_path data/Kvasir-SEG \
   --model gated_unet \
-  --exp student_run \
-  --split all
+  --split all \
+  --exp student_from_unet
 ```
 
 | Option | Description |

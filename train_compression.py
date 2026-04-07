@@ -20,7 +20,7 @@ parser = argparse.ArgumentParser(description="Train Student with Pruning + Gatin
 parser.add_argument("--dataset", type=str, default="kvasir", choices=["kvasir", "cvc"])
 parser.add_argument("--root_path", type=str, default="data/Kvasir-SEG")
 parser.add_argument("--teacher_model", type=str, default="unet_resnet152", help="Teacher model đã train")
-parser.add_argument("--teacher_exp", type=str, default="supervised", help="Experiment name của Teacher")
+parser.add_argument("--teacher_exp", type=str, default="teacher_unet", help="Experiment name của Teacher")
 parser.add_argument("--prune_ratio", type=float, default=0.5, help="Tỷ lệ pruning (0.4 - 0.6)")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
