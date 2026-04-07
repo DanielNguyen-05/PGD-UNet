@@ -33,11 +33,11 @@ from utils.channel_analysis import (
 from utils.checkpoints import load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
 from utils.compression_loss import CompressionLoss
 from utils.evaluation import build_evaluation_output_dir, evaluate_segmentation_dataset, save_evaluation_artifacts
-from utils.experiment import build_run_dir, ensure_run_layout, write_model_config, write_run_config
+from utils.experiment import build_run_dir, normalize_path_string, project_relative_path, ensure_run_layout, write_model_config, write_run_config
 from utils.losses import DiceLoss
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
-from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
+from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_overview_image, save_visualization_pdf, write_metrics_rows
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -70,10 +70,12 @@ parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=8)
-parser.add_argument("--final_eval_splits", nargs="*", default=["val", "test"])
+parser.add_argument("--final_eval_splits", nargs="*", default=["train", "val", "test"])
 parser.add_argument("--force_retrain_teacher", type=int, default=0)
 parser.add_argument("--force_reprune", type=int, default=0)
 parser.add_argument("--force_retrain_student", type=int, default=0)
+parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
+parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
 args = parser.parse_args()
 
 
@@ -86,12 +88,12 @@ def _write_json(path: Path, payload: dict) -> None:
 def _phase_dir(phase: str, variant: str) -> Path:
     return build_run_dir(
         project_root=PROJECT_ROOT,
-        branch="proposal",
         experiment=args.exp,
         dataset=args.dataset,
         model_name="pdg_unet",
-        phase=phase,
+        phase=f"_{phase}",
         variant=variant,
+        output_root=args.output_root or None,
     )
 
 
@@ -225,7 +227,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
             {
                 "experiment": args.exp,
                 "dataset": args.dataset,
-                "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+                "dataset_root": normalize_path_string(args.root_path),
                 "split": split,
                 "model": extra["model_name"],
                 "architecture": extra["model_name"],
@@ -237,10 +239,11 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "in_channels": args.in_channels,
                 "patch_size": list(args.patch_size),
                 "checkpoint_name": checkpoint_path.name,
-                "checkpoint_path": str(checkpoint_path.resolve()),
+                "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             },
             result["average_metric"],
             result["case_metrics"],
+            project_root=PROJECT_ROOT,
         )
         macro = summary["metrics"]["macro_mean"]
         metrics_rows.append(
@@ -263,7 +266,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "evaluation_time_seconds": elapsed,
                 "teacher_model": args.teacher_model,
                 "prune_ratio": extra.get("prune_ratio"),
-                "checkpoint_path": str(checkpoint_path.resolve()),
+                "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
         )
         if result["visualization_samples"]:
@@ -271,6 +274,10 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 result["visualization_samples"],
                 layout["reports_dir"] / f"{phase}_{split}_visualizations.pdf",
                 title=f"{phase} | {split}",
+            )
+            save_visualization_overview_image(
+                result["visualization_samples"],
+                layout["visualization_dir"] / f"{phase}_{split}_visualizations.png",
             )
     if metrics_rows:
         write_metrics_rows(metrics_rows, layout["metrics_dir"] / f"{phase}_metrics.csv")
@@ -306,7 +313,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
     if reusable and reusable.is_file() and not bool(args.force_retrain_teacher):
         payload = load_checkpoint_into_model(reusable, model, device=device)
         history = payload.get("extra_state", {}).get("history", {})
-        logging.info("Loaded teacher checkpoint: %s", reusable)
+        logging.info("Loaded teacher checkpoint: %s", project_relative_path(reusable, PROJECT_ROOT))
         best_path = Path(reusable)
     else:
         ce_loss = CrossEntropyLoss()
@@ -359,6 +366,8 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 phase="teacher",
                 extra_state={"history": history},
                 is_best=is_best,
+                save_tagged_checkpoint=bool(args.save_history_checkpoints),
+                project_root=PROJECT_ROOT,
             )
             if is_best:
                 best_path = checkpoint_path
@@ -402,14 +411,14 @@ def _run_pruning(teacher_artifact: dict):
     blueprint_path = layout["artifacts_dir"] / "blueprint.json"
     if blueprint_path.is_file() and not bool(args.force_reprune):
         blueprint = load_blueprint_artifact(blueprint_path)
-        logging.info("Loaded blueprint: %s", blueprint_path)
+        logging.info("Loaded blueprint: %s", project_relative_path(blueprint_path, PROJECT_ROOT))
     else:
         blueprint = extract_pruned_blueprint(teacher_artifact["model"], prune_ratio=args.prune_ratio)
         blueprint.update(
             {
                 "teacher_model": args.teacher_model,
-                "teacher_checkpoint_path": str(teacher_artifact["checkpoint_path"]),
-                "teacher_run_dir": str(teacher_artifact["run_dir"]),
+                "teacher_checkpoint_path": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
+                "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
                 "student_name": "pdg_unet",
                 "mapping_rule": "teacher_encoder -> student_channel_config",
             }
@@ -471,7 +480,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
             "student_name": "gated_student",
-            "blueprint_path": str(pruning_artifact["blueprint_path"]),
+            "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "blueprint": pruning_artifact["blueprint"],
             "build_kwargs": {
                 "in_channels": db_train.in_channels,
@@ -493,7 +502,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     if reusable and reusable.is_file() and not bool(args.force_retrain_student):
         payload = load_checkpoint_into_model(reusable, student, device=device)
         history = payload.get("extra_state", {}).get("history", {})
-        logging.info("Loaded student checkpoint: %s", reusable)
+        logging.info("Loaded student checkpoint: %s", project_relative_path(reusable, PROJECT_ROOT))
         best_path = Path(reusable)
     else:
         criterion = CompressionLoss(args.num_classes, args.lambda_distill, args.lambda_sparsity)
@@ -564,6 +573,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 phase="student",
                 extra_state={"history": history, "blueprint": pruning_artifact["blueprint"]},
                 is_best=is_best,
+                save_tagged_checkpoint=bool(args.save_history_checkpoints),
+                project_root=PROJECT_ROOT,
             )
             if is_best:
                 best_path = checkpoint_path
@@ -646,7 +657,7 @@ if __name__ == "__main__":
     pipeline_dir = _phase_dir("pipeline", args.teacher_model)
     ensure_run_layout(pipeline_dir)
     write_run_config(pipeline_dir, vars(args))
-    _configure_logging(pipeline_dir / "log.txt")
+    _configure_logging(pipeline_dir / "run.log")
     logging.info("PDG pipeline args: %s", args)
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
@@ -659,15 +670,15 @@ if __name__ == "__main__":
     _write_json(
         pipeline_dir / "pipeline_summary.json",
         {
-            "teacher_checkpoint": str(teacher_artifact["checkpoint_path"]),
+            "teacher_checkpoint": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
             "teacher_model_info": teacher_artifact["metadata"],
-            "pruning_blueprint_path": str(pruning_artifact["blueprint_path"]),
+            "pruning_blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "pruning_blueprint": pruning_artifact["blueprint"],
-            "student_checkpoint": str(student_artifact["checkpoint_path"]),
+            "student_checkpoint": project_relative_path(student_artifact["checkpoint_path"], PROJECT_ROOT),
             "student_model_info": student_artifact["metadata"],
-            "teacher_run_dir": str(teacher_artifact["run_dir"]),
-            "pruning_run_dir": str(pruning_artifact["run_dir"]),
-            "student_run_dir": str(student_artifact["run_dir"]),
+            "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
+            "pruning_run_dir": project_relative_path(pruning_artifact["run_dir"], PROJECT_ROOT),
+            "student_run_dir": project_relative_path(student_artifact["run_dir"], PROJECT_ROOT),
         },
     )
     logging.info("PDG pipeline completed.")
