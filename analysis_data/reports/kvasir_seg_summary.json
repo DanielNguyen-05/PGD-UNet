@@ -1,4 +1,4 @@
-{
+﻿{
   "dataset_name": "kvasir_seg",
   "dataset_root": "/Users/dangnguyen/Desktop/PGD-UNet/data/Kvasir-SEG",
   "num_pairs": 1000,
@@ -984,3 +984,4 @@
     }
   ]
 }
+
