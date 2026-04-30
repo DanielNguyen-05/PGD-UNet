@@ -261,10 +261,10 @@ parser.add_argument(
 parser.add_argument(
     "--warmup_pruning_epochs",
     type=int,
-    default=4,
+    default=0,
     help="number of final step-3 epochs reserved for late hard pruning and compact-student distillation",
 )
-parser.add_argument("--enable_step3_pruning", type=int, default=1, help="set to 1 to enable step-3 soft/late hard pruning, or 0 to train without step-3 pruning")
+parser.add_argument("--enable_step3_pruning", type=int, default=0, help="set to 1 to enable step-3 soft/late hard pruning, or 0 to train without step-3 pruning")
 parser.add_argument("--step3_pruning_epochs", type=int, default=None, help="number of final student epochs reserved for step-3 late hard pruning; alias for --warmup_pruning_epochs")
 parser.add_argument("--student_gate_near_off_threshold", type=float, default=0.10, help="gate value threshold used to flag channels as nearly switched off")
 parser.add_argument("--student_gate_open_value", type=float, default=0.999, help="gate probability used when student_variant disables gating")
@@ -395,6 +395,14 @@ def _phase_dir(phase: str) -> Path:
         available = ", ".join(sorted(PDG_PHASE_DIRS))
         raise KeyError(f"Unknown PDG phase '{phase}'. Available phases: {available}.")
     return _proposal_root_dir() / phase_dir_name
+
+
+def _completed_pipeline_checkpoint() -> Path:
+    return _phase_dir("student") / "checkpoints" / "last.pth"
+
+
+def _force_pipeline_rerun_requested() -> bool:
+    return bool(args.force_retrain_teacher) or bool(args.force_reprune) or bool(args.force_retrain_student)
 
 
 def _pruning_metadata() -> dict:
@@ -1533,7 +1541,7 @@ def _build_loaders(device: torch.device, image_mode: str):
         pin_memory=device.type == "cuda",
         worker_init_fn=worker_init_fn,
     )
-    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     return db_train, db_val, trainloader, valloader
 
 
@@ -1636,7 +1644,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
         except Exception as error:
             logging.warning("Skip %s/%s: %s", phase, split, error)
             continue
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
         output_dir = build_evaluation_output_dir(run_dir, args.dataset, extra["model_name"], checkpoint_path, split)
         start = time.perf_counter()
         result = evaluate_segmentation_dataset(
@@ -2972,6 +2980,14 @@ if __name__ == "__main__":
     logging.info("Output dir: %s", project_relative_path(proposal_root_dir, PROJECT_ROOT))
     logging.info("Teacher output root: %s", args.teacher_output_root or args.output_root or "outputs")
     logging.info("Teacher run dir: %s", project_relative_path(_phase_dir("teacher"), PROJECT_ROOT))
+
+    completed_checkpoint_path = _completed_pipeline_checkpoint()
+    if completed_checkpoint_path.is_file() and not _force_pipeline_rerun_requested():
+        logging.info(
+            "Skip PGD pipeline because student last checkpoint already exists: %s",
+            project_relative_path(completed_checkpoint_path, PROJECT_ROOT),
+        )
+        raise SystemExit(0)
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))

@@ -105,6 +105,10 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
         args.output_root,
         "--batch_size",
         str(args.batch_size),
+        "--base_lr",
+        str(args.base_lr),
+        "--num_workers",
+        str(args.num_workers),
         "--gpu",
         str(args.device).replace("cuda:", ""),
         "--encoder_pretrained",
@@ -112,6 +116,8 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
     ]
     if args.epochs is not None:
         command.extend(["--max_epochs", str(args.epochs)])
+    if args.force_retrain:
+        command.extend(["--force_retrain", "1"])
     command.extend(passthrough)
     return command
 
@@ -125,7 +131,10 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--device", type=str, default="0", help="GPU id, cuda:0, or cpu.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--encoder-pretrained", type=int, default=0, help="Use 1 for pretrained ResNet teacher if weights are available.")
+    parser.add_argument("--base-lr", type=float, default=0.01)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--encoder-pretrained", type=int, default=1, help="Use 1 for pretrained ResNet152 encoder when model=unet_resnet152.")
+    parser.add_argument("--force-retrain", action="store_true", help="Ignore compatible existing checkpoints and train again.")
     parser.add_argument("--summary-csv", type=str, default="", help="Optional path for aggregate summary CSV.")
     parser.add_argument("--stop-on-error", action="store_true")
     return parser.parse_known_args()
@@ -146,6 +155,23 @@ def main() -> int:
         if not Path(root_path).exists():
             logging.warning("Dataset root does not exist yet: %s", root_path)
         for model in args.models:
+            run_dir = build_basic_run_dir(
+                project_root=PROJECT_ROOT,
+                dataset=dataset,
+                model_name=model,
+                output_root=args.output_root or None,
+            )
+            last_checkpoint_path = run_dir / "checkpoints" / "last.pth"
+            if last_checkpoint_path.is_file() and not args.force_retrain:
+                logging.info(
+                    "Skip basic model because last checkpoint already exists | dataset=%s | model=%s | checkpoint=%s",
+                    dataset,
+                    model,
+                    last_checkpoint_path,
+                )
+                summary_rows.extend(_summarize_run(dataset, model, args.output_root))
+                continue
+
             command = _build_command(args, dataset, model, root_path, passthrough)
             logging.info("Run basic model | dataset=%s | model=%s", dataset, model)
             result = subprocess.run(command, cwd=PROJECT_ROOT, env=env)

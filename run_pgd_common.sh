@@ -65,18 +65,26 @@ STEP3_ARGS=()
 
 # STEP3_PRUNING=1 enables student recovery/distillation after structural pruning.
 # STEP3_PRUNING=0 evaluates the pruned student without the recovery stage.
-STEP3_PRUNING="${STEP3_PRUNING:-1}"
+STEP3_PRUNING="${STEP3_PRUNING:-0}"
 STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
-STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-4}"
+STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-0}"
 TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-outputs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$TEACHER_OUTPUT_ROOT}"
+SKIP_IF_LAST_EXISTS="${SKIP_IF_LAST_EXISTS:-1}"
+FORCE_RETRAIN_TEACHER="${FORCE_RETRAIN_TEACHER:-0}"
+FORCE_REPRUNE="${FORCE_REPRUNE:-0}"
+FORCE_RETRAIN_STUDENT="${FORCE_RETRAIN_STUDENT:-0}"
 
 # TEACHER_MODEL choices come from networks/net_factory.py:
 #   unet, resunet, vnet, unetr, unet_resnet152
 TEACHER_MODEL="${TEACHER_MODEL:-unet_resnet152}"
+# Pretrained weights are currently used by unet_resnet152. Keep this enabled
+# by default for all PGD scripts; unsupported models simply ignore it.
+ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 MAX_EPOCHS_TEACHER="${MAX_EPOCHS_TEACHER:-50}"
 MAX_EPOCHS_STUDENT="${MAX_EPOCHS_STUDENT:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 PATCH_SIZE_H="${PATCH_SIZE_H:-256}"
 PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
 
@@ -235,6 +243,7 @@ esac
 OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Teacher model: $TEACHER_MODEL"
+echo "Encoder pretrained: $ENCODER_PRETRAINED"
 echo "Pruning strategy: $PRUNE_METHOD"
 if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
@@ -253,19 +262,34 @@ echo "Loss output tag: $LOSS_TAG"
 echo "Output root: $OUTPUT_ROOT"
 echo "Teacher output root: $TEACHER_OUTPUT_ROOT"
 echo "Proposal output path: $OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_teacher/$LOSS_TAG/$OUTPUT_DIR"
+FINAL_LAST_CHECKPOINT="$OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_teacher/$LOSS_TAG/$OUTPUT_DIR/3_student/checkpoints/last.pth"
+echo "Final last checkpoint: $FINAL_LAST_CHECKPOINT"
 echo "Loss ablation: kd=$USE_KD_OUTPUT sparsity=$USE_SPARSITY feat=$USE_FEATURE_DISTILL aux=$USE_AUX_LOSS"
 echo "Loss weights: kd=$LAMBDA_DISTILL sparsity=$LAMBDA_SPARSITY feat=$LAMBDA_FEAT aux=$LAMBDA_AUX"
 echo "Loss methods: seg=$SEG_LOSS_METHOD distill=$DISTILL_LOSS_METHOD label=${LOSS_METHOD:-auto}"
+
+if [ "$SKIP_IF_LAST_EXISTS" = "1" ] \
+  && [ -f "$FINAL_LAST_CHECKPOINT" ] \
+  && [ "$FORCE_RETRAIN_TEACHER" != "1" ] \
+  && [ "$FORCE_REPRUNE" != "1" ] \
+  && [ "$FORCE_RETRAIN_STUDENT" != "1" ]; then
+  echo "Skip existing completed PGD run because last checkpoint exists: $FINAL_LAST_CHECKPOINT"
+  exit 0
+fi
 
 python run_pgd.py \
   --dataset "$DATASET_KEY" \
   --root_path "$ROOT_PATH" \
   --teacher_model "$TEACHER_MODEL" \
+  --encoder_pretrained "$ENCODER_PRETRAINED" \
   --exp "$EXP_NAME" \
   --max_epochs_teacher "$MAX_EPOCHS_TEACHER" \
   --max_epochs_student "$MAX_EPOCHS_STUDENT" \
   --output_root "$OUTPUT_ROOT" \
   --teacher_output_root "$TEACHER_OUTPUT_ROOT" \
+  --force_retrain_teacher "$FORCE_RETRAIN_TEACHER" \
+  --force_reprune "$FORCE_REPRUNE" \
+  --force_retrain_student "$FORCE_RETRAIN_STUDENT" \
   "${PRUNE_ARGS[@]}" \
   "${STEP3_ARGS[@]}" \
   --use_kd_output "$USE_KD_OUTPUT" \
@@ -282,6 +306,7 @@ python run_pgd.py \
   "${LOSS_METHOD_ARGS[@]}" \
   --feature_layers $FEATURE_LAYERS \
   --batch_size "$BATCH_SIZE" \
+  --num_workers "$NUM_WORKERS" \
   --patch_size "$PATCH_SIZE_H" "$PATCH_SIZE_W"
 
 echo "=============================="

@@ -334,7 +334,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
             logging.warning("Skipping final evaluation for split '%s': %s", split, error)
             continue
 
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
         output_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, split)
         start_time = time.perf_counter()
         result = evaluate_segmentation_dataset(
@@ -453,6 +453,18 @@ def train(args, snapshot_path):
         image_mode=image_mode,
     )
     logging.info(
+        "Dataset sizes | train=%d (%s) | val=%d (%s)",
+        len(db_train),
+        args.train_split,
+        len(db_val),
+        args.val_split,
+    )
+    logging.info(
+        "Split manifests | train=%s | val=%s",
+        project_relative_path(getattr(db_train, "manifest_path", None), PROJECT_ROOT),
+        project_relative_path(getattr(db_val, "manifest_path", None), PROJECT_ROOT),
+    )
+    logging.info(
         "Binary mask normalization | train: %s | val: %s",
         getattr(db_train, "force_binary_masks", False),
         getattr(db_val, "force_binary_masks", False),
@@ -547,7 +559,7 @@ def train(args, snapshot_path):
         db_val,
         batch_size=1,
         shuffle=False,
-        num_workers=1,
+        num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
     iterations_per_epoch = len(trainloader)
