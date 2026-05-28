@@ -58,7 +58,7 @@ fi
 #   S6 = middle/block Kneedle, designed for TEACHER_MODEL=unet_resnet152
 #   S7 = middle/block Otsu, designed for TEACHER_MODEL=unet_resnet152
 #   S8 = middle/block GMM, designed for TEACHER_MODEL=unet_resnet152
-PRUNE_STRATEGY="${PRUNE_STRATEGY:-S1}"
+PRUNE_STRATEGY="${PRUNE_STRATEGY:-S6}"
 PRUNE_STRATEGY="$(echo "$PRUNE_STRATEGY" | tr '[:lower:]' '[:upper:]')"
 PRUNE_ARGS=()
 STEP3_ARGS=()
