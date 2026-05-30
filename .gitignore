@@ -75,12 +75,10 @@ data/CVC-300/**
 !data/CVC-300/splits/
 !data/CVC-300/splits/**
 
-data/
+dataset/
 venv/
 .venv/
 outputs/
-data/
-app/
-outputs_final/
-outputs/
-app/
+
+pretrain/
+moe/

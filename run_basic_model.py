@@ -91,6 +91,22 @@ def _summarize_run(dataset: str, model: str, output_root: str) -> List[Dict[str,
     return rows
 
 
+def _rows_have_usable_metric(rows: Iterable[Dict[str, Any]], min_metric: float) -> bool:
+    rows = [dict(row) for row in rows]
+    if not rows:
+        return False
+    if min_metric < 0:
+        return True
+    for row in rows:
+        value = row.get("dice") or row.get("val_macro_dice") or row.get("val_dice")
+        try:
+            if value is not None and float(value) > min_metric:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path: str, passthrough: List[str]) -> List[str]:
     command = [
         sys.executable,
@@ -113,6 +129,14 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
         str(args.device).replace("cuda:", ""),
         "--encoder_pretrained",
         str(args.encoder_pretrained),
+        "--reuse_min_metric",
+        str(args.reuse_min_metric),
+        "--vnet_normalization",
+        args.vnet_normalization,
+        "--vnet_has_dropout",
+        str(args.vnet_has_dropout),
+        "--vnet_has_residual",
+        str(args.vnet_has_residual),
     ]
     if args.epochs is not None:
         command.extend(["--max_epochs", str(args.epochs)])
@@ -125,7 +149,12 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
 def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(description="Run existing basic-model trainer across datasets/models.")
     parser.add_argument("--datasets", nargs="+", default=["cvc_300", "cvc_clinicdb", "kvasir_seg", "etis", "cvc_colondb"], choices=list_available_datasets())
-    parser.add_argument("--models", nargs="+", default=["unet", "resunet", "vnet", "unetr", "unet_resnet152"], choices=list_models())
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["unet", "resunet", "vnet", "unetr", "unet_resnet152", "att_unet", "r2unet", "unet_plus_plus"],
+        choices=list_models(),
+    )
     parser.add_argument("--config", type=str, default="", help="Optional JSON/YAML config with dataset_roots.")
     parser.add_argument("--output-root", type=str, default="outputs")
     parser.add_argument("--device", type=str, default="0", help="GPU id, cuda:0, or cpu.")
@@ -133,8 +162,23 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--base-lr", type=float, default=0.01)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--encoder-pretrained", type=int, default=1, help="Use 1 for pretrained ResNet152 encoder when model=unet_resnet152.")
+    parser.add_argument(
+        "--encoder-pretrained",
+        type=int,
+        default=1,
+        help="Use 1 for supported pretrained encoders such as unet_resnet152 and unet_plus_plus.",
+    )
     parser.add_argument("--force-retrain", action="store_true", help="Ignore compatible existing checkpoints and train again.")
+    parser.add_argument("--reuse-min-metric", type=float, default=1e-8, help="Do not skip/reuse existing zero-metric runs unless this is set <0.")
+    parser.add_argument(
+        "--vnet-normalization",
+        type=str,
+        default="groupnorm",
+        choices=["batchnorm", "instancenorm", "groupnorm", "none"],
+        help="Normalization layer for VNet.",
+    )
+    parser.add_argument("--vnet-has-dropout", type=int, default=0, help="Set to 1 to enable VNet dropout.")
+    parser.add_argument("--vnet-has-residual", type=int, default=1, help="Set to 1 to use residual VNet blocks.")
     parser.add_argument("--summary-csv", type=str, default="", help="Optional path for aggregate summary CSV.")
     parser.add_argument("--stop-on-error", action="store_true")
     return parser.parse_known_args()
@@ -163,14 +207,23 @@ def main() -> int:
             )
             last_checkpoint_path = run_dir / "checkpoints" / "last.pth"
             if last_checkpoint_path.is_file() and not args.force_retrain:
-                logging.info(
-                    "Skip basic model because last checkpoint already exists | dataset=%s | model=%s | checkpoint=%s",
+                existing_rows = _summarize_run(dataset, model, args.output_root)
+                if _rows_have_usable_metric(existing_rows, args.reuse_min_metric):
+                    logging.info(
+                        "Skip basic model because last checkpoint and metrics already exist | dataset=%s | model=%s | checkpoint=%s",
+                        dataset,
+                        model,
+                        last_checkpoint_path,
+                    )
+                    summary_rows.extend(existing_rows)
+                    continue
+                logging.warning(
+                    "Existing checkpoint has no usable metric above %.6f, so rerun instead of skipping | dataset=%s | model=%s | checkpoint=%s",
+                    args.reuse_min_metric,
                     dataset,
                     model,
                     last_checkpoint_path,
                 )
-                summary_rows.extend(_summarize_run(dataset, model, args.output_root))
-                continue
 
             command = _build_command(args, dataset, model, root_path, passthrough)
             logging.info("Run basic model | dataset=%s | model=%s", dataset, model)

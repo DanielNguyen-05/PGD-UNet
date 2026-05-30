@@ -16,11 +16,6 @@ if command -v module >/dev/null 2>&1; then
   module load "${CUDA_MODULE:-cuda-11.8.0-gcc-11.4.0-cuusula}" || true
 fi
 
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate "${CONDA_ENV:-pgdunet}"
-fi
-
 PROJECT_DIR="${PROJECT_DIR:-$HOME/PGD-UNet}"
 if [ -d "$PROJECT_DIR" ]; then
   cd "$PROJECT_DIR"
@@ -54,11 +49,15 @@ fi
 #   S2 = Kneedle adaptive threshold
 #   S3 = Otsu adaptive threshold
 #   S4 = GMM adaptive threshold
-#   S5 = middle/block static pruning, designed for TEACHER_MODEL=unet_resnet152
-#   S6 = middle/block Kneedle, designed for TEACHER_MODEL=unet_resnet152
-#   S7 = middle/block Otsu, designed for TEACHER_MODEL=unet_resnet152
-#   S8 = middle/block GMM, designed for TEACHER_MODEL=unet_resnet152
-PRUNE_STRATEGY="${PRUNE_STRATEGY:-S6}"
+#   S5 = middle/block static pruning, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S6 = middle/block Kneedle, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S7 = middle/block Otsu, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S8 = middle/block GMM, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S9 = full/internal block static pruning, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S10 = full/internal block Kneedle, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S11 = full/internal block Otsu, designed for ResNet152 encoder teachers such as unet_resnet152
+#   S12 = full/internal block GMM, designed for ResNet152 encoder teachers such as unet_resnet152
+PRUNE_STRATEGY="${PRUNE_STRATEGY:-S1}"
 PRUNE_STRATEGY="$(echo "$PRUNE_STRATEGY" | tr '[:lower:]' '[:upper:]')"
 PRUNE_ARGS=()
 STEP3_ARGS=()
@@ -76,17 +75,24 @@ FORCE_REPRUNE="${FORCE_REPRUNE:-0}"
 FORCE_RETRAIN_STUDENT="${FORCE_RETRAIN_STUDENT:-0}"
 
 # TEACHER_MODEL choices come from networks/net_factory.py:
-#   unet, resunet, vnet, unetr, unet_resnet152
+#   unet, resunet, vnet, unetr, unet_resnet152, att_unet, r2unet, unet_plus_plus
 TEACHER_MODEL="${TEACHER_MODEL:-unet_resnet152}"
-# Pretrained weights are currently used by unet_resnet152. Keep this enabled
+# Pretrained weights are currently used by ResNet152-backed teachers. Keep this enabled
 # by default for all PGD scripts; unsupported models simply ignore it.
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 MAX_EPOCHS_TEACHER="${MAX_EPOCHS_TEACHER:-50}"
-MAX_EPOCHS_STUDENT="${MAX_EPOCHS_STUDENT:-50}"
+MAX_EPOCHS_STUDENT="${MAX_EPOCHS_STUDENT:-60}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 PATCH_SIZE_H="${PATCH_SIZE_H:-256}"
 PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
+DEVICE="${DEVICE:-0}"
+DEVICE="${DEVICE//,/ }"
+if [[ "$DEVICE" == *" "* ]]; then
+  read -r -a RUN_DEVICE_LIST <<< "$DEVICE"
+  DEVICE="${RUN_DEVICE_LIST[0]}"
+fi
 
 # -----------------------------
 # Optional loss-study controls
@@ -95,16 +101,16 @@ PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
 # outputs/pgd_unet/<dataset>/<teacher>_teacher/<loss_tag>/<pruning_output>/
 #
 # USE_KD_OUTPUT=0 and LAMBDA_DISTILL=0 disables teacher output distillation.
-# USE_SPARSITY=0 disables gate sparsity pressure in step 3.
+# USE_SPARSITY is deprecated; effective sparsity stays 0 in the main pipeline.
 # USE_FEATURE_DISTILL=1 enables feature tensor distillation at FEATURE_LAYERS.
 # USE_AUX_LOSS=1 enables auxiliary output supervision if a model exposes aux logits.
 USE_KD_OUTPUT="${USE_KD_OUTPUT:-1}"
-USE_SPARSITY="${USE_SPARSITY:-1}"
+USE_SPARSITY="${USE_SPARSITY:-0}"
 USE_FEATURE_DISTILL="${USE_FEATURE_DISTILL:-0}"
 USE_AUX_LOSS="${USE_AUX_LOSS:-0}"
 
 LAMBDA_DISTILL="${LAMBDA_DISTILL:-0.3}"
-LAMBDA_SPARSITY="${LAMBDA_SPARSITY:-0.3}"
+LAMBDA_SPARSITY="${LAMBDA_SPARSITY:-0.0}"
 LAMBDA_FEAT="${LAMBDA_FEAT:-0.1}"
 LAMBDA_AUX="${LAMBDA_AUX:-0.2}"
 # FEATURE_LAYERS is space-separated. Default compares bottleneck features only.
@@ -128,39 +134,11 @@ LOSS_METHOD_ARGS=()
 if [ -n "$LOSS_METHOD" ]; then
   LOSS_METHOD_ARGS=(--loss_method "$LOSS_METHOD")
 fi
+STUDENT_VARIANT="${STUDENT_VARIANT:-full}"
 
 sanitize_tag() {
   printf "%s" "$1" | sed -E 's/[^A-Za-z0-9._-]+/_/g; s/^[._-]+//; s/[._-]+$//'
 }
-
-LOSS_TAG=""
-if [ -n "$LOSS_METHOD" ]; then
-  LOSS_TAG="loss_$(sanitize_tag "$LOSS_METHOD")"
-else
-  LOSS_TAG="loss_seg"
-  if [ "$SEG_LOSS_METHOD" != "hybrid" ]; then
-    LOSS_TAG="${LOSS_TAG}_${SEG_LOSS_METHOD}"
-  fi
-  if [ "$USE_KD_OUTPUT" = "1" ]; then
-    if [ "$DISTILL_LOSS_METHOD" = "mse" ]; then
-      LOSS_TAG="${LOSS_TAG}_kd"
-    else
-      LOSS_TAG="${LOSS_TAG}_kd_${DISTILL_LOSS_METHOD}"
-    fi
-  fi
-  if [ "$USE_FEATURE_DISTILL" = "1" ]; then
-    LOSS_TAG="${LOSS_TAG}_feat"
-  fi
-  if [ "$USE_AUX_LOSS" = "1" ]; then
-    LOSS_TAG="${LOSS_TAG}_aux"
-  fi
-  if [ "$USE_SPARSITY" = "1" ]; then
-    LOSS_TAG="${LOSS_TAG}_sparsity"
-  fi
-  if [ "$LOSS_TAG" = "loss_seg" ]; then
-    LOSS_TAG="loss_seg_only"
-  fi
-fi
 
 case "$STEP3_PRUNING" in
   1|true|yes|y|on)
@@ -234,18 +212,76 @@ case "$PRUNE_STRATEGY" in
     RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
+  S9)
+    PRUNE_METHOD="full_static"
+    PRUNE_RATE="${PRUNE_RATE:-0.5}"
+    if ! PRUNE_RATE_TAG=$(python -c 'import sys; v = float(sys.argv[1]); sys.exit("PRUNE_RATE must be in [0, 1).") if not (0.0 <= v < 1.0) else None; print(f"{v:.12g}")' "$PRUNE_RATE"); then
+      echo "Invalid PRUNE_RATE=$PRUNE_RATE for S9 full-static pruning"
+      exit 1
+    fi
+    RATE_TAG="$PRUNE_RATE_TAG"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD" --static_prune_ratio "$PRUNE_RATE" --prune_ratio "$PRUNE_RATE")
+    ;;
+  S10)
+    PRUNE_METHOD="full_kneedle"
+    RATE_TAG="auto"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
+    ;;
+  S11)
+    PRUNE_METHOD="full_otsu"
+    RATE_TAG="auto"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
+    ;;
+  S12)
+    PRUNE_METHOD="full_gmm"
+    RATE_TAG="auto"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
+    ;;
   *)
-    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1, S2, S3, S4, S5, S6, S7, or S8."
+    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1-S12."
     exit 1
     ;;
 esac
 
-OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
+SPARSITY_LOSS_ACTIVE=0
+
+LOSS_TAG=""
+if [ -n "$LOSS_METHOD" ]; then
+  LOSS_TAG="loss_$(sanitize_tag "$LOSS_METHOD")"
+else
+  LOSS_TAG="loss_seg"
+  if [ "$SEG_LOSS_METHOD" != "hybrid" ]; then
+    LOSS_TAG="${LOSS_TAG}_${SEG_LOSS_METHOD}"
+  fi
+  if [ "$USE_KD_OUTPUT" = "1" ]; then
+    if [ "$DISTILL_LOSS_METHOD" = "mse" ]; then
+      LOSS_TAG="${LOSS_TAG}_kd"
+    else
+      LOSS_TAG="${LOSS_TAG}_kd_${DISTILL_LOSS_METHOD}"
+    fi
+  fi
+  if [ "$USE_FEATURE_DISTILL" = "1" ]; then
+    LOSS_TAG="${LOSS_TAG}_feat"
+  fi
+  if [ "$USE_AUX_LOSS" = "1" ]; then
+    LOSS_TAG="${LOSS_TAG}_aux"
+  fi
+  if [ "$SPARSITY_LOSS_ACTIVE" = "1" ]; then
+    LOSS_TAG="${LOSS_TAG}_sparsity"
+  fi
+  if [ "$LOSS_TAG" = "loss_seg" ]; then
+    LOSS_TAG="loss_seg_only"
+  fi
+fi
+
+PRUNE_STRATEGY_TAG="$(printf "%s" "$PRUNE_STRATEGY" | tr '[:upper:]' '[:lower:]')"
+OUTPUT_DIR="output_${PRUNE_STRATEGY_TAG}_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Teacher model: $TEACHER_MODEL"
 echo "Encoder pretrained: $ENCODER_PRETRAINED"
+echo "Device: $DEVICE"
 echo "Pruning strategy: $PRUNE_METHOD"
-if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ]; then
+if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ] || [ "$PRUNE_METHOD" = "full_static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
 else
   echo "Static prune ratio: not used"
@@ -265,6 +301,7 @@ echo "Proposal output path: $OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_
 FINAL_LAST_CHECKPOINT="$OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_teacher/$LOSS_TAG/$OUTPUT_DIR/3_student/checkpoints/last.pth"
 echo "Final last checkpoint: $FINAL_LAST_CHECKPOINT"
 echo "Loss ablation: kd=$USE_KD_OUTPUT sparsity=$USE_SPARSITY feat=$USE_FEATURE_DISTILL aux=$USE_AUX_LOSS"
+echo "Effective sparsity loss: $SPARSITY_LOSS_ACTIVE"
 echo "Loss weights: kd=$LAMBDA_DISTILL sparsity=$LAMBDA_SPARSITY feat=$LAMBDA_FEAT aux=$LAMBDA_AUX"
 echo "Loss methods: seg=$SEG_LOSS_METHOD distill=$DISTILL_LOSS_METHOD label=${LOSS_METHOD:-auto}"
 
@@ -281,6 +318,7 @@ python run_pgd.py \
   --dataset "$DATASET_KEY" \
   --root_path "$ROOT_PATH" \
   --teacher_model "$TEACHER_MODEL" \
+  --gpu "$DEVICE" \
   --encoder_pretrained "$ENCODER_PRETRAINED" \
   --exp "$EXP_NAME" \
   --max_epochs_teacher "$MAX_EPOCHS_TEACHER" \
@@ -304,9 +342,11 @@ python run_pgd.py \
   --distill_loss_method "$DISTILL_LOSS_METHOD" \
   --distill_temperature "$DISTILL_TEMPERATURE" \
   "${LOSS_METHOD_ARGS[@]}" \
+  --student_variant "$STUDENT_VARIANT" \
   --feature_layers $FEATURE_LAYERS \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
+  --early_stop_patience "$EARLY_STOP_PATIENCE" \
   --patch_size "$PATCH_SIZE_H" "$PATCH_SIZE_W"
 
 echo "=============================="

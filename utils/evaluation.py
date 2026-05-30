@@ -94,6 +94,12 @@ def evaluate_segmentation_dataset(
             sample_elapsed = time.perf_counter() - sample_start
             metric_array = np.array(metric_i, dtype=np.float64)
             total_metric.append(metric_array)
+            prediction_np = prediction.detach().cpu().numpy()
+            label_np = sample["label"].detach().cpu().numpy()
+            pred_foreground_pixels = int((prediction_np > 0).sum())
+            gt_foreground_pixels = int((label_np > 0).sum())
+            pred_foreground_ratio = float(pred_foreground_pixels / max(1, prediction_np.size))
+            gt_foreground_ratio = float(gt_foreground_pixels / max(1, label_np.size))
 
             case_name = _normalize_case_name(sample)
             image_path = _sample_value(sample, "image_path")
@@ -134,6 +140,11 @@ def evaluate_segmentation_dataset(
                         "mask_path": mask_path,
                         "prediction_path": prediction_path,
                         "inference_time_s": float(sample_elapsed),
+                        "pred_foreground_pixels": pred_foreground_pixels,
+                        "gt_foreground_pixels": gt_foreground_pixels,
+                        "pred_foreground_ratio": pred_foreground_ratio,
+                        "gt_foreground_ratio": gt_foreground_ratio,
+                        "empty_foreground_prediction": int(pred_foreground_pixels == 0 and gt_foreground_pixels > 0),
                         "dice": float(metric_row[0]),
                         "iou": float(metric_row[1]),
                         "hd95": float(metric_row[2]),
@@ -199,6 +210,17 @@ def _write_case_metrics_csv(case_metrics: List[Dict], output_dir: Path) -> Path:
         writer.writeheader()
         writer.writerows(case_metrics)
     return csv_path
+
+
+def _relative_case_metrics(case_metrics: List[Dict], project_root: Path | str) -> List[Dict]:
+    relative_rows: List[Dict] = []
+    for row in case_metrics:
+        updated = dict(row)
+        for key in ("image_path", "mask_path", "prediction_path"):
+            if key in updated:
+                updated[key] = project_relative_path(updated.get(key), project_root)
+        relative_rows.append(updated)
+    return relative_rows
 
 
 def _method_metadata(metadata: Dict) -> Dict[str, object]:
@@ -364,9 +386,14 @@ def save_evaluation_artifacts(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = _write_case_metrics_csv(case_metrics, output_dir)
-    sample_metrics_path = _write_sample_metrics_csv(case_metrics, output_dir, metadata)
-    summary = build_evaluation_summary(metadata, average_metric, case_metrics)
+    resolved_case_metrics = (
+        _relative_case_metrics(case_metrics, project_root)
+        if project_root is not None
+        else case_metrics
+    )
+    csv_path = _write_case_metrics_csv(resolved_case_metrics, output_dir)
+    sample_metrics_path = _write_sample_metrics_csv(resolved_case_metrics, output_dir, metadata)
+    summary = build_evaluation_summary(metadata, average_metric, resolved_case_metrics)
     summary["case_metrics_file"] = (
         project_relative_path(csv_path, project_root)
         if project_root is not None

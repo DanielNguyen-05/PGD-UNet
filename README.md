@@ -1,9 +1,49 @@
-# Medical Image Segmentation Codebase
+﻿# Medical Image Segmentation Codebase
+
+## Current PGD-UNet update notes
+
+The main proposal pipeline is now focused on structural pruning plus optional
+teacher output distillation. The default PGD teacher is `unet_resnet152`,
+a custom U-Net decoder with a ResNet152 encoder. Learnable
+gates are kept only as backward-compatible no-op methods; the default student
+path does not use gate sparsity.
+
+Main student training modes:
+
+- Segmentation only: `--use_kd_output 0`
+- Segmentation + KD: `--use_kd_output 1 --lambda_distill <value>`
+
+The supported pruning strategies are:
+
+| Strategy | Method | Display |
+|---|---|---|
+| `S1` | `static` | Static Blueprint |
+| `S2` | `kneedle` | Kneedle Blueprint |
+| `S3` | `otsu` | Otsu Blueprint |
+| `S4` | `gmm` | GMM Blueprint |
+| `S5` | `middle_static` | Middle-Static Conv2 |
+| `S6` | `middle_kneedle` | Middle-Kneedle Conv2 |
+| `S7` | `middle_otsu` | Middle-Otsu Conv2 |
+| `S8` | `middle_gmm` | Middle-GMM Conv2 |
+| `S9` | `full_static` | Full-Static Block |
+| `S10` | `full_kneedle` | Full-Kneedle Block |
+| `S11` | `full_otsu` | Full-Otsu Block |
+| `S12` | `full_gmm` | Full-GMM Block |
+
+S5-S8 keep ResNet bottleneck boundaries full and prune only `conv2` inside the
+UNet++ ResNet152 encoder. S9-S12 prune the full bottleneck main path, including
+`conv3` output. For UNet++, the encoder is pruned and stage projection layers
+restore decoder feature widths so the UNet++ decoder remains shape-compatible.
+
+Visualization panels now include explicit `Image`, `GT`, and `PR` labels.
+Student `checkpoints/train_log.csv` includes stable validation columns for
+plotting, including `val_macro_dice`, `val_iou`, `val_hd95`,
+`learning_rate`, `best_val_dice`, and `is_best`.
 
 Codebase PyTorch cho bài toán medical image segmentation 2D, được tổ chức theo 2 nhánh rõ ràng:
 
 - `basic branch`: train và benchmark các baseline như `unet`, `unet_resnet152`, `resunet`, `vnet`, `unetr`
-- `proposal branch`: pipeline cho `pdg_unet` gồm `teacher -> pruning -> student`, với output chuẩn nằm dưới `outputs/pgd_unet/...`
+- `proposal branch`: pipeline PGD gồm `teacher -> pruning -> student`, với default teacher `unet_resnet152` và output chuẩn nằm dưới `outputs/pgd_unet/...`
 
 Mục tiêu của repo là chuẩn hóa:
 
@@ -22,8 +62,10 @@ Code_main/
 ├─ networks/
 │  ├─ Basic_Model/
 │  ├─ PGD_Unet/
+│  │  ├─ blueprint_unet_plus_plus.py
 │  │  ├─ gated_unet.py
-│  │  ├─ middle_pruned_resnet_unet.py
+│  │  ├─ middle_pruned_unet_plus_plus.py
+│  │  ├─ full_pruning_unet_plus_plus.py
 │  │  ├─ pruning.py
 │  │  ├─ pruning_algorithms/
 │  │  │  └─ Kneedle_Otsu_GMM.py
@@ -141,6 +183,19 @@ Nếu split đã tồn tại, script sẽ giữ nguyên và báo skip. Chỉ th�
 
 ## 5. Basic branch
 
+Model basic hien duoc dang ky qua `networks/net_factory.py`:
+
+- `unet`: U-Net 2D co ban
+- `resunet`: Residual U-Net
+- `vnet`: V-Net 2D
+- `unetr`: UNETR 2D
+   - `unet_resnet152`: U-Net decoder voi ResNet152 encoder
+- `att_unet`: Attention U-Net, dua theo reference trong `networks/Basic_Model/src_ref/Image_Segmentation`
+- `r2unet`: R2U-Net/Recurrent Residual U-Net, dua theo reference trong `networks/Basic_Model/src_ref/Image_Segmentation`
+- `unet_plus_plus`: UNet++ wrapper tu `segmentation_models_pytorch`
+
+Voi `unet_resnet152` va `unet_plus_plus`, `--encoder_pretrained 1` se dung pretrained encoder neu dependency/weights san sang; dung `--encoder_pretrained 0` de tat.
+
 ### Train
 
 Ví dụ:
@@ -179,18 +234,18 @@ python test2d.py --dataset kvasir_seg --root_path data/Kvasir-SEG --model unet -
 ### Train full pipeline
 
 ```bash
-python run_pgd.py --dataset kvasir_seg --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir_seg --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
+python run_pgd.py --dataset kvasir_seg --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir_seg --max_epochs_teacher 50 --max_epochs_student 60 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --use_kd_output 1 --lambda_distill 0.3 --batch_size 8 --patch_size 256 256
 ```
 
 Lưu ý:
 
-- với `teacher_model=unet_resnet152`, `--encoder_pretrained` hiện mặc định là `1`
+- với `TEACHER_MODEL=unet_resnet152`, `--encoder_pretrained` hiện mặc định là `1`
 - nên nếu teacher phải train lại từ đầu ở step 1, encoder ResNet152 sẽ mặc định dùng pretrained weights
 - nếu bạn muốn tắt pretrained và train teacher từ random backbone, hãy truyền `--encoder_pretrained 0`
 
-### Pruning strategy S1/S2/S3/S4/S5/S6/S7/S8
+### Pruning strategy S1-S12
 
-Pipeline hiện hỗ trợ 8 strategy ở step 2:
+Pipeline hiện hỗ trợ 12 strategy ở step 2:
 
 | Strategy | Method nội bộ | Ý nghĩa | Cần prune rate |
 |---|---|---|---|
@@ -202,8 +257,12 @@ Pipeline hiện hỗ trợ 8 strategy ở step 2:
 | `S6` | `middle_kneedle` | giống S5 về cấu trúc block, nhưng mask của `conv2` lấy bằng Kneedle riêng cho từng bottleneck như S2 | không |
 | `S7` | `middle_otsu` | giống S5 về cấu trúc block, nhưng mask của `conv2` lấy bằng Otsu riêng cho từng bottleneck như S3 | không |
 | `S8` | `middle_gmm` | giống S5 về cấu trúc block, nhưng mask của `conv2` lấy bằng GMM riêng cho từng bottleneck như S4 | không |
+| `S9` | `full_static` | prune full bottleneck path, gồm cả `conv3 output`, bằng static top-k; rebuild residual/decoder shape | có, qua `PRUNE_RATE` hoặc `--static_prune_ratio` |
+| `S10` | `full_kneedle` | giống S9 nhưng chọn channels bằng Kneedle | không |
+| `S11` | `full_otsu` | giống S9 nhưng chọn channels bằng Otsu | không |
+| `S12` | `full_gmm` | giống S9 nhưng chọn channels bằng GMM | không |
 
-Với `S1/static` hoặc `S5/middle_static`, nếu prune rate là `r`, mỗi layer được prune sẽ giữ:
+Với `S1/static`, `S5/middle_static`, hoặc `S9/full_static`, nếu prune rate là `r`, mỗi layer được prune sẽ giữ:
 
 ```text
 ceil((1 - r) * num_channels)
@@ -211,12 +270,14 @@ ceil((1 - r) * num_channels)
 
 channel có importance score cao nhất. `static_prune_ratio` phải nằm trong `[0, 1)` và luôn giữ ít nhất 1 channel.
 
-Riêng `S5/middle_static`, `S6/middle_kneedle`, `S7/middle_otsu` và `S8/middle_gmm` hiện được thiết kế cho `teacher_model=unet_resnet152`. Với mỗi bottleneck block trong `layer1/layer2/layer3/layer4`, pipeline dùng `conv2` làm layer giữa để prune. `conv1`/`bn1`, output của `conv3`/`bn3`, downsample và shape residual được giữ full để đầu/cuối block không bị cắt. Vì `conv2` output bị prune thật, `conv3` sẽ chỉ copy input slice tương ứng các channel `conv2` được giữ, nhưng output channel của `conv3` vẫn giữ nguyên. Các strategy này dùng student kiến trúc `middle_pruned_resnet_unet`, nên PDG gate, sparsity loss và late hard pruning ở step 3 được tắt.
+Riêng `S5/middle_static`, `S6/middle_kneedle`, `S7/middle_otsu` và `S8/middle_gmm` hiện được thiết kế cho `TEACHER_MODEL=unet_resnet152`. Với mỗi bottleneck block trong `layer1/layer2/layer3/layer4`, pipeline dùng `conv2` làm layer giữa để prune. `conv1`/`bn1`, output của `conv3`/`bn3`, downsample và shape residual được giữ full để đầu/cuối block không bị cắt. Vì `conv2` output bị prune thật, `conv3` sẽ chỉ copy input slice tương ứng các channel `conv2` được giữ, nhưng output channel của `conv3` vẫn giữ nguyên. Với default teacher, các strategy này dùng student kiến trúc `middle_pruned_resnet_unet`.
+
+`S9/full_static`, `S10/full_kneedle`, `S11/full_otsu` và `S12/full_gmm` cũng dành cho `TEACHER_MODEL=unet_resnet152`, nhưng dùng student kiến trúc `full_pruning_resnet_unet`. Các strategy này prune full main path của bottleneck: input/output của `conv1`, `conv2`, và cả `conv3 output/bn3`. Output block được truyền tuần tự làm input cho block sau; identity skip dùng channel selection không tham số khi có thể, còn decoder U-Net custom được rebuild để skip connection khớp shape.
 
 Interface khuyến nghị:
 
-- shell ngoài cùng dùng `PRUNE_STRATEGY=S1/S2/S3/S4/S5/S6/S7/S8`
-- Python nội bộ dùng `--prune_method static/kneedle/otsu/gmm/middle_static/middle_kneedle/middle_otsu/middle_gmm`
+- shell ngoài cùng dùng `PRUNE_STRATEGY=S1` đến `S12`
+- Python nội bộ dùng `--prune_method static/kneedle/otsu/gmm/middle_static/middle_kneedle/middle_otsu/middle_gmm/full_static/full_kneedle/full_otsu/full_gmm`
 - `--prune_ratio` vẫn được giữ để backward compatibility, nhưng nên dùng `--static_prune_ratio` cho `static`
 
 Ví dụ chạy trực tiếp Python:
@@ -245,6 +306,14 @@ python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher
 
 # S8: middle-gmm pruning
 python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
+
+# S9: full-static block pruning 50%, gồm cả conv3 output
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S9 --static_prune_ratio 0.5
+
+# S10/S11/S12: full block dynamic pruning
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S10
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S11
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S12
 ```
 
 Khi chạy qua script theo dataset, set biến môi trường:
@@ -270,6 +339,14 @@ PRUNE_STRATEGY=S6 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=out
 # S7/S8: middle dynamic, PRUNE_RATE không dùng
 PRUNE_STRATEGY=S7 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 PRUNE_STRATEGY=S8 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+
+# S9: full-static, dùng PRUNE_RATE giống S1
+PRUNE_STRATEGY=S9 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+
+# S10/S11/S12: full dynamic, PRUNE_RATE không dùng
+PRUNE_STRATEGY=S10 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+PRUNE_STRATEGY=S11 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+PRUNE_STRATEGY=S12 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 ```
 
 `run_pgd_common.sh` sẽ tự map strategy và tạo thư mục experiment con theo format:
@@ -296,15 +373,19 @@ TEACHER_MODEL=unet_resnet152 PRUNE_STRATEGY=S1 bash run_pgd_etis.sh
 
 | Strategy | Experiment folder |
 |---|---|
-| `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_static_0.5_4` |
-| `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=0` | `output_static_0.5_no` |
-| `S2`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_kneedle_auto_4` |
-| `S3`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_otsu_auto_4` |
-| `S4`, `STEP3_PRUNING=0` | `output_gmm_auto_no` |
-| `S5`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_middle_static_0.5_4` |
-| `S6`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_middle_kneedle_auto_4` |
-| `S7`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_middle_otsu_auto_4` |
-| `S8`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_middle_gmm_auto_4` |
+| `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s1_static_0.5_4` |
+| `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=0` | `output_s1_static_0.5_no` |
+| `S2`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s2_kneedle_auto_4` |
+| `S3`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s3_otsu_auto_4` |
+| `S4`, `STEP3_PRUNING=0` | `output_s4_gmm_auto_no` |
+| `S5`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s5_middle_static_0.5_4` |
+| `S6`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s6_middle_kneedle_auto_4` |
+| `S7`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s7_middle_otsu_auto_4` |
+| `S8`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s8_middle_gmm_auto_4` |
+| `S9`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s9_full_static_0.5_4` |
+| `S10`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s10_full_kneedle_auto_4` |
+| `S11`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s11_full_otsu_auto_4` |
+| `S12`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_s12_full_gmm_auto_4` |
 
 Log khi chạy sẽ có dạng:
 
@@ -313,41 +394,37 @@ Pruning strategy: static
 Static prune ratio: 0.5
 Step-3 pruning: enabled
 Step-3 pruning epochs: 4
-Experiment folder: output_static_0.5_4
+Experiment folder: output_s1_static_0.5_4
 Teacher output root: outputs
-Loss ablation: kd=1 sparsity=1 feat=0 aux=0
-Loss weights: kd=0.3 sparsity=0.3 feat=0.1 aux=0.2
+Loss ablation: kd=1 sparsity=0 feat=0 aux=0
+Loss weights: kd=0.3 sparsity=0.0 feat=0.1 aux=0.2
 ```
 
 ### Loss ablation cho Step 3
 
-PDG student training có thể bật/tắt từng loss bằng argument hoặc biến môi trường trong các script dataset.
+PGD student training hiện tập trung vào 2 chế độ chính: segmentation only và segmentation + teacher output KD. Feature distillation, auxiliary loss và sparsity/gate loss vẫn còn flag tương thích nhưng mặc định tắt.
 
 Các argument chính:
 
 - `--use_kd_output 1/0`, mặc định `1`
-- `--use_sparsity 1/0`, mặc định `1`
+- `--use_sparsity 1/0`, mặc định `0` và không dùng trong pipeline chính
 - `--use_feature_distill 1/0`, mặc định `0`
 - `--use_aux_loss 1/0`, mặc định `0`
 - `--seg_loss_method ce|dice|hybrid`, mặc định `hybrid`
 - `--distill_loss_method mse|ce|dice|kl|hybrid`, mặc định `mse`; `mse` chính là distillation cũ của repo
 - `--loss_method`, optional label cho Table III và output folder, ví dụ `"Proposed + KL KD"`
-- `--lambda_feat`, mặc định `0.1`
-- `--lambda_aux`, mặc định `0.2`
+- `--lambda_feat`, mặc định `0.1`, chỉ có tác dụng khi bật feature distill
+- `--lambda_aux`, mặc định `0.2`, chỉ có tác dụng khi bật aux loss
 - `--feature_layers`, mặc định `bottleneck`
-- mặc định feature distillation chỉ so tensor `bottleneck` ở điểm giao giữa encoder và decoder; loss này vẫn backprop qua feature của student nên encoder student được update weight
 
 Tổng loss:
 
 ```text
 Ltotal = Lseg
        + lambda_distill * L_KD_output      nếu use_kd_output=1
-       + lambda_feat * L_feature_distill   nếu use_feature_distill=1
-       + lambda_aux * L_aux                nếu use_aux_loss=1
-       + lambda_sparsity * L_sparsity      nếu use_sparsity=1
 ```
 
-Nếu loss nào tắt, history và metrics vẫn ghi loss đó bằng `0.0` để dễ vẽ biểu đồ.
+Nếu loss nào tắt, history và metrics vẫn ghi loss đó bằng `0.0` để dễ vẽ biểu đồ. Hai mode khuyến nghị cho paper là `loss_seg_only` và `loss_seg_kd`.
 
 `loss_tag` được tự sinh theo loss đang bật. Các cấu hình default vẫn giữ tên folder cũ, còn khi đổi segmentation/KD loss thì tag sẽ thêm tên loss để phân biệt:
 
@@ -355,9 +432,8 @@ Nếu loss nào tắt, history và metrics vẫn ghi loss đó bằng `0.0` đ�
 |---|---|
 | segmentation only | `loss_seg_only` |
 | segmentation + KD | `loss_seg_kd` |
-| segmentation + KD + sparsity | `loss_seg_kd_sparsity` |
 | segmentation + KD + feature distill | `loss_seg_kd_feat` |
-| segmentation + KD + feature distill + aux + sparsity | `loss_seg_kd_feat_aux_sparsity` |
+| segmentation + KD + feature distill + aux | `loss_seg_kd_feat_aux` |
 | CE segmentation only | `loss_seg_ce_only` |
 | Dice segmentation only | `loss_seg_dice_only` |
 | segmentation + KL KD | `loss_seg_kd_kl` |
@@ -373,7 +449,7 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<experiment_folder
 Ví dụ:
 
 ```text
-outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/loss_seg_kd_sparsity/output_gmm_auto_no/
+outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/loss_seg_kd/output_s4_gmm_auto_no/
 ```
 
 Teacher vẫn dùng chung ở:
@@ -393,8 +469,8 @@ USE_KD_OUTPUT=0 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd
 # Segmentation + KD
 USE_KD_OUTPUT=1 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd_cvc_clinicdb.sh
 
-# Segmentation + KD + feature + aux + sparsity
-USE_KD_OUTPUT=1 USE_SPARSITY=1 USE_FEATURE_DISTILL=1 USE_AUX_LOSS=1 LAMBDA_FEAT=0.1 LAMBDA_AUX=0.2 bash run_pgd_cvc_clinicdb.sh
+# Optional legacy feature + aux study, still without sparsity/gate
+USE_KD_OUTPUT=1 USE_SPARSITY=0 USE_FEATURE_DISTILL=1 USE_AUX_LOSS=1 LAMBDA_FEAT=0.1 LAMBDA_AUX=0.2 bash run_pgd_cvc_clinicdb.sh
 
 # Table III: CE / Dice / KL / Hybrid loss study
 USE_KD_OUTPUT=0 USE_SPARSITY=0 SEG_LOSS_METHOD=ce LOSS_METHOD="CE" bash run_pgd_cvc_clinicdb.sh
@@ -414,13 +490,13 @@ Nếu trước đó teacher đã được train trong một output thử nghiệ
 Các lần thử pruning khác nhau vẫn ghi vào folder con bên trong cùng root teacher, ví dụ:
 
 ```text
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_static_0.5_4/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_static_0.5_no/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_kneedle_auto_4/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_middle_static_0.5_4/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_middle_kneedle_auto_4/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_middle_otsu_auto_4/2_pruning/
-outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_middle_gmm_auto_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s1_static_0.5_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s1_static_0.5_no/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s2_kneedle_auto_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s5_middle_static_0.5_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s6_middle_kneedle_auto_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s7_middle_otsu_auto_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_s8_middle_gmm_auto_4/2_pruning/
 ```
 
 ### Teacher reuse
@@ -435,7 +511,7 @@ Nếu reuse từ `basic branch`, checkpoint sẽ được register lại vào `1
 
 Mặc định repo **không train lại teacher nếu đã có checkpoint compatible**. Chỉ khi cả 3 nguồn trên đều không có checkpoint phù hợp, hoặc bạn bật `--force_retrain_teacher 1`, thì `1_teacher` mới train lại từ đầu.
 
-Nếu teacher phải train lại từ đầu và `teacher_model=unet_resnet152`, mặc định repo sẽ dùng `encoder_pretrained=1`.
+Nếu teacher phải train lại từ đầu và `TEACHER_MODEL=unet_resnet152`, mặc định repo sẽ dùng `encoder_pretrained=1`.
 
 ### Cách tận dụng weight teacher để không cần train lại
 
@@ -452,7 +528,7 @@ python train_basic_model.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB
 Sau đó chạy proposal với cùng `teacher_model` và `dataset`:
 
 ```bash
-python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 60 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Khi đó `train_pgd.py` sẽ:
@@ -467,7 +543,7 @@ Khi đó `train_pgd.py` sẽ:
 Bạn cũng có thể chỉ định thẳng một checkpoint đã có:
 
 ```bash
-python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc_clinicdb/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc_clinicdb/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 60 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu checkpoint này tồn tại và compatible, nó sẽ được ưu tiên dùng trước proposal outputs và basic outputs. Nếu checkpoint không tồn tại hoặc không tương thích, pipeline mới tiếp tục check các nguồn còn lại.
@@ -504,12 +580,11 @@ Step 2 hiện không chỉ sinh `blueprint` rồi dựng một student mới ho�
 Luồng hiện tại là:
 
 1. phân tích teacher và chọn `kept_channel_indices` theo `prune_method`
-2. sinh `blueprint` và `channel_config` cho `PDGUNet`
-3. build `pruned student` từ blueprint
+2. sinh `blueprint` và `channel_config` cho student
+3. build `pruned student` từ blueprint: với default `unet_resnet152`, S1-S4 dùng `PDGUNet`, S5-S8 dùng `middle_pruned_resnet_unet`, S9-S12 dùng `full_pruning_resnet_unet`; nhánh `unet_plus_plus` vẫn dùng các architecture `blueprint_unet_plus_plus`, `middle_pruned_unet_plus_plus`, `full_pruning_unet_plus_plus` khi được chọn rõ
 4. nạp lại weight của teacher ứng với các channel được giữ lại vào từng stage encoder của student
 5. copy thêm các tensor còn tương thích bằng exact-match fallback
-6. force gate mở ra để baseline ở `2_pruning` không bị suy giảm do gate mặc định
-7. evaluate `train / val / test`
+6. evaluate `train / val / test`
 
 Điều này có nghĩa:
 
@@ -547,23 +622,17 @@ Metadata này cũng được lưu trong `weight_transfer` của phase pruning đ
 Step 3 hiện bám theo logic implementation sau:
 
 1. load blueprint và pruned student checkpoint từ `2_pruning`
-2. build `PDGUNet` từ đúng `channel_config` của blueprint
+2. build lại đúng student architecture từ blueprint (`PDGUNet`, `middle_pruned_resnet_unet`, `full_pruning_resnet_unet`, hoặc các biến thể `unet_plus_plus` khi teacher là `unet_plus_plus`)
 3. load teacher đã freeze từ `1_teacher`
 4. train student với:
-   `Ltotal = Lseg + lambda_distill * Ldistill + lambda_sparsity * Lsparsity`
+   `Ltotal = Lseg` hoặc `Ltotal = Lseg + lambda_distill * Ldistill`
 
 Student ở đầu step 3 không khởi tạo random:
 
 - weight ban đầu được load từ checkpoint của `2_pruning`
 - checkpoint này đã chứa pruned-student sau bước structural pruning và teacher-weight subset reuse ở step 2
 
-Nếu late hard pruning xảy ra ở cuối step 3:
-
-- compact student mới cũng không khởi tạo random
-- repo rebuild kiến trúc nhỏ hơn rồi copy lại subset weight từ student ngay trước thời điểm hard pruning
-- distillation sau đó tiếp tục chạy trên compact student đã được kế thừa weight
-
-Nếu `student_variant` bật distillation, teacher sẽ supervise student xuyên suốt toàn bộ step 3. `step3_pruning_epochs` hiện được dùng như cửa sổ epoch cuối để kích hoạt `late hard pruning`; `warmup_pruning_epochs` vẫn còn như alias tương thích CLI cũ. Nếu truyền `--enable_step3_pruning 0`, step 3 sẽ không dùng gate sparsity pressure và không late hard prune.
+Pipeline chính không dùng gate sparsity hoặc late hard pruning ở step 3 nữa. `step3_pruning_epochs`, `warmup_pruning_epochs` và các method gate còn tồn tại để không phá checkpoint/script cũ, nhưng default path chỉ fine-tune student bình thường, có hoặc không có KD.
 
 Trong `3_student/configs/`, repo hiện lưu thêm `student_pruning_config.json` để nhìn nhanh các mốc epoch của pruning, ví dụ:
 
@@ -581,78 +650,33 @@ Trong `3_student/configs/`, repo hiện lưu thêm `student_pruning_config.json`
 - `gate_search_epoch_window_0based`
 - `effective_late_pruning_epochs`
 
-Quy ước hiện tại:
+Các field này được giữ chủ yếu để tương thích cấu hình cũ:
 
-- `step3_pruning_enabled` cho biết step 3 có bật pruning hay không
-- `step3_pruning_epochs` là số epoch cuối dành cho late hard pruning khi step 3 pruning bật
+- `step3_pruning_enabled` cho biết step 3 có bật pruning legacy hay không
+- `step3_pruning_epochs` là số epoch cuối dành cho late pruning legacy nếu người dùng tự bật
 - `requested_warmup_pruning_epochs` là giá trị bạn truyền từ CLI hoặc giá trị được map từ `step3_pruning_epochs`
 - `warmup_pruning_epochs` là giá trị effective thật sau khi đã clamp theo `max_epochs_student`
-- `hard_pruning_apply_epoch` là mốc thực thi hard pruning theo **0-based index**
-- nếu số epoch train nhỏ hơn số epoch pruning cuối yêu cầu, config sẽ phản ánh đúng giá trị effective thực tế thay vì chỉ lặp lại giá trị request ban đầu
+- `hard_pruning_apply_epoch` là mốc legacy theo **0-based index**
+- với pipeline chính hiện tại, các giá trị này thường bằng trạng thái tắt/không dùng
 
 ### Distillation
 
 Hiện tại distillation target là `logits`, chưa phải feature adapter riêng.
 
-### Gating và soft pruning
+### Gate compatibility
 
-Step 3 hỗ trợ `learnable channel gating` trên student.
+Gate/gated UNet không còn là pipeline chính. `PDGUNet` bây giờ là pruned UNet bình thường; các method như `get_gate_tensors()`, `force_gates_open()` và `set_gate_trainable()` chỉ còn là no-op để checkpoint/script cũ không vỡ.
 
-Soft pruning được định nghĩa là:
-
-- gate học được theo channel
-- cộng thêm sparsity regularization
-- channel nào có gate thấp dần sẽ được xem là bị suy yếu / gần tắt
-
-Hard pruning trong step 3 hiện được thực hiện ở cửa sổ epoch cuối:
-
-- gate được dùng để quyết định channel nào bị giữ / bị cắt
-- student được rebuild với `channel_config` nhỏ hơn
-- compact student không dùng random init, mà kế thừa subset weight từ student trước prune
-- sau đó compact student tiếp tục được distill trong các epoch còn lại
-
-### Late hard pruning policy
-
-Step 3 hiện dùng `step3_pruning_epochs` như số epoch cuối dành cho `late hard pruning`. `warmup_pruning_epochs` vẫn được hỗ trợ để không phá CLI cũ.
-
-Flag chính:
-
-- `--enable_step3_pruning`
-- `--step3_pruning_epochs`
-- `--warmup_pruning_epochs`
-- `--student_variant`
-- `--lambda_distill`
-- `--lambda_sparsity`
-- `--student_gate_near_off_threshold`
-- `--student_hard_gate_threshold`
-
-Ý nghĩa:
-
-- nếu `--enable_step3_pruning 0`:
-  - không có soft pruning ở step 3
-  - không có late hard pruning ở step 3
-  - distillation vẫn chạy nếu variant bật distillation
-- trong các epoch trước cửa sổ cuối:
-  - gating + sparsity active
-  - soft pruning behavior được theo dõi
-  - nếu variant có distillation thì teacher distillation cũng chạy xuyên suốt
-- ở đầu cửa sổ `warmup_pruning_epochs` cuối:
-  - hệ thống dùng `student_hard_gate_threshold` hoặc fallback sang `student_gate_near_off_threshold`
-  - channel có gate thấp bị cắt cứng thật
-  - nếu threshold vẫn giữ toàn bộ channel ở một stage, repo sẽ cắt channel yếu nhất của stage đó để bảo đảm có structural pruning thật
-  - student được rebuild với số channel mới
-- trong các epoch cuối sau khi cắt:
-  - compact student tiếp tục distill từ frozen teacher
-  - gate không còn tiếp tục đẩy sparsity như giai đoạn trước
+Flag `--enable_step3_pruning`, `--warmup_pruning_epochs`, `--lambda_sparsity`, `--student_gate_near_off_threshold` và `--student_hard_gate_threshold` được giữ để tương thích CLI cũ, nhưng mặc định không kích hoạt sparsity/gate loss.
 
 ### Student variants
 
-Step 3 hỗ trợ 4 variant:
+Step 3 nên dùng 2 mode chính:
 
-- `pruned_no_gate`
-- `pruned_distill`
-- `pruned_gate_sparsity`
-- `full`
+- `--use_kd_output 0`: segmentation only
+- `--use_kd_output 1`: segmentation + KD/distillation
+
+`student_variant=full` và `student_variant=pruned_distill` đều đi qua student không gate. `student_variant=pruned_gate_sparsity` chỉ còn là alias tương thích cũ và cũng bị ép tắt gate/sparsity trong policy hiện tại.
 
 ## 8. Checkpoint và metadata
 
@@ -681,7 +705,7 @@ Với proposal branch, `model_info` hiện cũng ghi rõ checkpoint có phải r
 
 - `2_pruning` đang lưu model đã reuse weight từ teacher
 - `3_student` đang lưu model load từ `2_pruning`
-- compact student sau late hard pruning đang lưu model đã reuse subset weight từ student trước prune
+- `3_student` lưu metric/metadata fine-tune chính, có thể là segmentation only hoặc segmentation + KD
 
 Mặc định lưu bộ checkpoint gọn cho evaluate/reuse:
 
@@ -691,6 +715,17 @@ Mặc định lưu bộ checkpoint gọn cho evaluate/reuse:
 - `checkpoints/metrics.json`
 - `checkpoints/train_log.csv`
 - `checkpoints/metadata/best.json`
+
+Mỗi phase train/evaluate của proposal cũng có `log.txt` ngay trong thư mục phase, ví dụ:
+
+```text
+1_teacher/log.txt
+2_pruning/log.txt
+3_student/log.txt
+pipeline/log.txt
+```
+
+File này ghi lại tiến trình chạy, thông tin reuse checkpoint, pruning search, epoch loss/metric và các bước export artifact. `pipeline/run.log` vẫn được giữ để tương thích output cũ.
 
 Checkpoint mặc định gồm `model_state_dict` và metadata cần thiết (`epoch`, `best_metric`, `metrics`, `config`, `model_info`, `phase`, `extra_state`). Repo không lưu `optimizer_state_dict`/scheduler/scaler mặc định để tránh file quá nặng.
 
@@ -749,7 +784,7 @@ outputs/<model_name>/<dataset>/
 
 ### 9.2 Proposal branch
 
-Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua script dataset, `--output_root` là root chung, mặc định `outputs`; cấu hình strategy và step 3 nằm ở folder con như `output_static_0.5_4`, `output_static_0.5_no`, `output_kneedle_auto_4`, `output_middle_static_0.5_4`, `output_middle_kneedle_auto_4`, `output_middle_otsu_auto_4`, `output_middle_gmm_auto_4`, hoặc `output_gmm_auto_no`.
+Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua script dataset, `--output_root` là root chung, mặc định `outputs`; cấu hình strategy và step 3 nằm ở folder con như `output_s1_static_0.5_4`, `output_s1_static_0.5_no`, `output_s2_kneedle_auto_4`, `output_s5_middle_static_0.5_4`, `output_s6_middle_kneedle_auto_4`, `output_s7_middle_otsu_auto_4`, `output_s8_middle_gmm_auto_4`, hoặc `output_s4_gmm_auto_no`.
 
 Teacher có root riêng qua `--teacher_output_root`. Khi dùng script dataset, giá trị mặc định là `outputs`, vì vậy:
 
@@ -759,32 +794,32 @@ Teacher có root riêng qua `--teacher_output_root`. Khi dùng script dataset, g
 ```text
 <output_root>/pgd_unet/<dataset>/<teacher_model>_teacher/
 ├─ 1_teacher/
-├─ output_static_0.5_4/
+├─ output_s1_static_0.5_4/
 │  ├─ 2_pruning/
 │  ├─ 3_student/
 │  ├─ student_final/
 │  └─ pipeline/
-└─ output_kneedle_auto_4/
+└─ output_s2_kneedle_auto_4/
    ├─ 2_pruning/
    ├─ 3_student/
    ├─ student_final/
    └─ pipeline/
-└─ output_middle_static_0.5_4/
+└─ output_s5_middle_static_0.5_4/
    ├─ 2_pruning/
    ├─ 3_student/
    ├─ student_final/
    └─ pipeline/
-└─ output_middle_kneedle_auto_4/
+└─ output_s6_middle_kneedle_auto_4/
    ├─ 2_pruning/
    ├─ 3_student/
    ├─ student_final/
    └─ pipeline/
-└─ output_middle_otsu_auto_4/
+└─ output_s7_middle_otsu_auto_4/
    ├─ 2_pruning/
    ├─ 3_student/
    ├─ student_final/
    └─ pipeline/
-└─ output_middle_gmm_auto_4/
+└─ output_s8_middle_gmm_auto_4/
    ├─ 2_pruning/
    ├─ 3_student/
    ├─ student_final/
@@ -910,18 +945,15 @@ Repo hiện hỗ trợ:
 - `performance.pdf`
 - `channel_analysis_tables.pdf`
 - `channel_analysis_charts.pdf`
-- `gating_analysis_tables.pdf`
-- `gating_analysis_charts.pdf`
-- `student_channel_gating_report_tables.pdf`
-- `student_channel_gating_report_charts.pdf`
+- `student_channel_report_tables.pdf`
+- `student_channel_report_charts.pdf`
 
-### Channel / gating / pruning artifacts
+### Channel / pruning artifacts
 
 Các nhóm artifact chính:
 
 - `artifacts/channel_analysis/`
 - `artifacts/visualizations/`
-- `artifacts/gating_analysis/`
 - `artifacts/student_tuning_analysis/`
 - `artifacts/pruning_analysis/`
 
@@ -931,10 +963,8 @@ Step 3 export thêm:
 
 - student input channel profile
 - student final channel profile
-- gate summary
-- gate values per channel
 - so sánh `student_input -> student_final`
-- per-epoch diagnostics để chứng minh soft pruning behavior
+- per-epoch diagnostics và `checkpoints/train_log.csv` để vẽ validation curves
 
 ## 12. Một số lưu ý thực tế
 
@@ -943,7 +973,7 @@ Step 3 export thêm:
 - path trong metadata ưu tiên dạng tương đối như `outputs/...` hoặc `evaluations/...`, không lưu absolute path
 - `test2d.py` ưu tiên output mới trong `outputs/...`, nhưng vẫn fallback được cho run legacy nếu cần
 - distillation của step 3 hiện là `logits distillation`
-- late hard pruning của step 3 hiện rebuild lại student thật dựa trên gate threshold ở cửa sổ epoch cuối
+- gate/sparsity không còn thuộc pipeline chính; code gate cũ chỉ còn compatibility no-op
 
 ## 13. compare_artifacts.py
 
@@ -1000,13 +1030,38 @@ bash run_basic_models.sh
 Có thể chỉnh nhanh bằng biến môi trường:
 
 ```bash
-DATASETS="cvc_300 cvc_clinicdb kvasir_seg etis cvc_colondb" MODELS="unet resunet vnet unetr unet_resnet152" EPOCHS=50 BATCH_SIZE=8 bash run_basic_models.sh
+DATASETS="cvc_300 cvc_clinicdb kvasir_seg etis cvc_colondb" MODELS="unet resunet vnet unetr unet_resnet152 att_unet r2unet unet_plus_plus" EPOCHS=50 BATCH_SIZE=8 bash run_basic_models.sh
 ```
 
 Hoặc gọi Python wrapper trực tiếp:
 
 ```bash
 python run_basic_model.py --datasets cvc_300 kvasir_seg --models unet resunet --output-root outputs --device 0 --epochs 50 --batch-size 8
+```
+
+### Script folders
+
+- `scripts_pgd_s1_s12_student_losses/`: PGD S1-S12, tach rieng script `seg_only` va `seg_kd` cho moi dataset.
+- `scripts_basic_models/`: basic models, mac dinh gom `unet`, `resunet`, `vnet`, `unetr`, `unet_resnet152`, `att_unet`, `r2unet`, `unet_plus_plus`.
+
+Chay PGD theo tung loss:
+
+```bash
+bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_only.sh
+bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
+```
+
+Co the chia S-runs hoac basic models len nhieu GPU bang `DEVICE`:
+
+```bash
+DEVICE="0 1" bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
+DEVICE="0 1" bash scripts_basic_models/run_basic_models_kvasir_seg.sh
+```
+
+Voi PGD, run dau tien se chay tuan tu de tao/reuse teacher checkpoint, sau do cac S tiep theo moi chay song song theo danh sach GPU. Neu teacher da co san, co the bo buoc nay:
+
+```bash
+DEVICE="0 1" PGD_TEACHER_PREPARE_FIRST=0 bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
 ```
 
 Wrapper này gọi lại `train_basic_model.py`, nên output vẫn nằm trong cấu trúc cũ:
@@ -1085,6 +1140,24 @@ statistics/outputs/<dataset_name>/table2_pruning.csv
 statistics/outputs/<dataset_name>/table3_loss.csv
 statistics/outputs/<dataset_name>/table4_ablation.csv
 statistics/outputs/<dataset_name>/table5_computational_cost.csv
+```
+
+Figure 5 duoc xuat theo ca file tong hop va 3 file rieng theo nhom pruning:
+
+```text
+statistics/outputs/<dataset_name>/figure5_layerwise_pruning_ratio.pdf
+statistics/outputs/<dataset_name>/figure5_s1_s4_blueprint_stage_pruning_ratio.pdf
+statistics/outputs/<dataset_name>/figure5_s5_s8_middle_conv2_layerwise_pruning_ratio.pdf
+statistics/outputs/<dataset_name>/figure5_s9_s12_full_block_layerwise_pruning_ratio.pdf
+```
+
+Phase `2_pruning` cung xuat them bang/chung cu copy weight:
+
+```text
+2_pruning/artifacts/weight_transfer/weight_transfer.json
+2_pruning/artifacts/weight_transfer/stage_transfer_rows.csv
+2_pruning/artifacts/weight_transfer/block_transfer_rows.csv
+2_pruning/artifacts/weight_transfer/decoder_subset_transfer_rows.csv
 ```
 
 Bảng mean/std across datasets:
